@@ -12,7 +12,7 @@ public enum Sex: String, CaseIterable, Identifiable {
 extension Sharing {
     struct RootView: BaseView {
         let resolver: Resolver
-        @StateObject var state = StateModel()
+        @StateObject var state: StateModel
 
         @State private var display: Bool = false
         @State private var copied: Bool = false
@@ -29,6 +29,11 @@ extension Sharing {
                 calendar.date(from: endComponents)!
         }()
 
+        init(resolver: Resolver) {
+            self.resolver = resolver
+            _state = StateObject(wrappedValue: StateModel(resolver: resolver))
+        }
+
         var body: some View {
             Form {
                 Section {
@@ -38,7 +43,7 @@ extension Sharing {
                             ForEach(Sex.allCases) { sex in
                                 Text(NSLocalizedString(sex.rawValue, comment: "")).tag(Optional(sex.rawValue))
                             }
-                        }.onChange(of: state.sex) { _ in
+                        }.onChange(of: state.sex) {
                             state.saveSetting()
                         }
                         HStack {
@@ -53,12 +58,6 @@ extension Sharing {
                     )
                 }
 
-                if !state.uploadStats {
-                    Section {
-                        Toggle("Just iAPS version number", isOn: $state.uploadVersion)
-                    } header: { Text("Share Bare Minimum") }
-                }
-
                 Section {}
                 footer: {
                     Text(
@@ -68,7 +67,7 @@ extension Sharing {
 
                 Section {
                     HStack {
-                        Text(display ? state.identfier : "Tap to display")
+                        Text(display ? state.identfier : NSLocalizedString("Tap to display", comment: "Token display button"))
                     }
                     .frame(maxWidth: .infinity, alignment: .center)
                     .onTapGesture { display.toggle() }
@@ -81,7 +80,7 @@ extension Sharing {
                         }
                     }
                 }
-                header: { Text("\nYour recovery token") }
+                header: { Text("Your recovery token") }
 
                 footer: {
                     Text((copied && display) ? "" : display ? "Long press to copy" : "")
@@ -102,7 +101,6 @@ extension Sharing {
             }
             .dynamicTypeSize(...DynamicTypeSize.xxLarge)
             .onAppear {
-                configureView()
                 state.savedSettings()
             }
             .navigationBarTitle("Share and Backup")
