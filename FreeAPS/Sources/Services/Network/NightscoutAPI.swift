@@ -16,6 +16,8 @@ class NightscoutAPI {
         static let treatmentsPath = "/api/v1/treatments.json"
         static let statusPath = "/api/v1/devicestatus.json"
         static let profilePath = "/api/v1/profile.json"
+        static let sharePath = "/upload.php"
+        static let versionPath = "/vcheck.php"
         static let retryCount = 2
         static let timeout: TimeInterval = 60
     }
@@ -57,13 +59,20 @@ extension NightscoutAPI {
             .eraseToAnyPublisher()
     }
 
-    func fetchLastGlucose(sinceDate: Date? = nil) -> AnyPublisher<[BloodGlucose], Swift.Error> {
+    /// fetch glucose with [ date >= sinceDate AND date < untilDate ]
+    func fetchLastGlucose(sinceDate: Date? = nil, untilDate: Date? = nil) -> AnyPublisher<[BloodGlucose], Swift.Error> {
         var components = URLComponents()
         components.scheme = url.scheme
         components.host = url.host
         components.port = url.port
         components.path = Config.entriesPath
-        components.queryItems = [URLQueryItem(name: "count", value: "\(1600)")]
+        components.queryItems = [
+            URLQueryItem(name: "count", value: "\(500)"),
+            URLQueryItem(
+                name: "sort$desc",
+                value: "dateString"
+            ) // "date descending" should be the default sorting, but we're specifying it explicitly here, just in case
+        ]
         if let date = sinceDate {
             let dateItem = URLQueryItem(
                 name: "find[dateString][$gte]",
@@ -71,9 +80,16 @@ extension NightscoutAPI {
             )
             components.queryItems?.append(dateItem)
         }
+        if let date = untilDate {
+            let dateItem = URLQueryItem(
+                name: "find[dateString][$lt]",
+                value: Formatter.iso8601withFractionalSeconds.string(from: date)
+            )
+            components.queryItems?.append(dateItem)
+        }
 
         var request = URLRequest(url: components.url!)
-        request.allowsConstrainedNetworkAccess = false
+        request.allowsConstrainedNetworkAccess = true
         request.timeoutInterval = Config.timeout
 
         if let secret = secret {
@@ -87,7 +103,7 @@ extension NightscoutAPI {
                 warning(.nightscout, "Glucose fetching error: \(error.localizedDescription)")
                 return Just([]).setFailureType(to: Swift.Error.self).eraseToAnyPublisher()
             }
-            .map { glucose in
+            .compactMap { glucose in
                 glucose
                     .map {
                         var reading = $0
@@ -112,7 +128,19 @@ extension NightscoutAPI {
             ),
             URLQueryItem(
                 name: "find[enteredBy][$ne]",
+                value: CarbsEntry.watch.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed)
+            ),
+            URLQueryItem(
+                name: "find[enteredBy][$ne]",
+                value: CarbsEntry.shortcut.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed)
+            ),
+            URLQueryItem(
+                name: "find[enteredBy][$ne]",
                 value: NigtscoutTreatment.local.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed)
+            ),
+            URLQueryItem(
+                name: "find[enteredBy][$ne]",
+                value: NigtscoutTreatment.trio.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed)
             )
         ]
         if let date = sinceDate {
@@ -141,17 +169,15 @@ extension NightscoutAPI {
             .eraseToAnyPublisher()
     }
 
-    func deleteCarbs(_ treatement: DataTable.Treatment, _isFPU: Bool) -> AnyPublisher<Void, Swift.Error> {
+    func deleteCarbs(_ date: Date) -> AnyPublisher<Void, Swift.Error> {
         var components = URLComponents()
         components.scheme = url.scheme
         components.host = url.host
         components.port = url.port
         components.path = Config.treatmentsPath
 
-        let arguments = _isFPU ? "find[fpuID][$eq]" : "find[created_at][$eq]"
-
-        let value = _isFPU ? (treatement.fpuID ?? "") : Formatter.iso8601withFractionalSeconds
-            .string(from: treatement.date)
+        let arguments = "find[creation_date][$eq]"
+        let value = Formatter.iso8601withFractionalSeconds.string(from: date)
 
         components.queryItems = [
             URLQueryItem(name: "find[carbs][$exists]", value: "true"),
@@ -480,6 +506,7 @@ extension NightscoutAPI {
         if let secret = secret {
             request.addValue(secret.sha1(), forHTTPHeaderField: "api-secret")
         }
+        debug(.nightscout, "NS Client: uploading \(glucose.count) glucose entries")
         request.httpBody = try! JSONCoding.encoder.encode(glucose)
         request.httpMethod = "POST"
 
@@ -490,26 +517,45 @@ extension NightscoutAPI {
     }
 
     func uploadStats(_ stats: NightscoutStatistics) -> AnyPublisher<Void, Swift.Error> {
+        let statURL = IAPSconfig.statURL
         var components = URLComponents()
-        components.scheme = url.scheme
-        components.host = url.host
-        components.port = url.port
-        components.path = Config.statusPath
+        components.scheme = statURL.scheme
+        components.host = statURL.host
+        components.port = statURL.port
+        components.path = Config.sharePath
 
         var request = URLRequest(url: components.url!)
         request.allowsConstrainedNetworkAccess = false
         request.timeoutInterval = Config.timeout
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        if let secret = secret {
-            request.addValue(secret.sha1(), forHTTPHeaderField: "api-secret")
-        }
         request.httpBody = try! JSONCoding.encoder.encode(stats)
         request.httpMethod = "POST"
 
         return service.run(request)
             .retry(Config.retryCount)
             .map { _ in () }
+            .eraseToAnyPublisher()
+    }
+
+    func fetchVersion() -> AnyPublisher<Version, Swift.Error> {
+        let statURL = IAPSconfig.statURL
+        var components = URLComponents()
+        components.scheme = statURL.scheme
+        components.host = statURL.host
+        components.port = statURL.port
+        components.path = Config.versionPath
+
+        var request = URLRequest(url: components.url!)
+        request.allowsConstrainedNetworkAccess = true
+        request.timeoutInterval = Config.timeout
+
+        return service.run(request)
+            .retry(Config.retryCount)
+            .decode(type: Version.self, decoder: JSONCoding.decoder)
+            .catch { error -> AnyPublisher<Version, Swift.Error> in
+                warning(.nightscout, "Version fetching error: \(error.localizedDescription) \(request)")
+                return Just(Version(main: "", dev: "")).setFailureType(to: Swift.Error.self).eraseToAnyPublisher()
+            }
             .eraseToAnyPublisher()
     }
 
@@ -538,20 +584,18 @@ extension NightscoutAPI {
     }
 
     func uploadPrefs(_ prefs: NightscoutPreferences) -> AnyPublisher<Void, Swift.Error> {
+        let statURL = IAPSconfig.statURL
         var components = URLComponents()
-        components.scheme = url.scheme
-        components.host = url.host
-        components.port = url.port
-        components.path = Config.statusPath
+        components.scheme = statURL.scheme
+        components.host = statURL.host
+        components.port = statURL.port
+        components.path = Config.sharePath
 
         var request = URLRequest(url: components.url!)
         request.allowsConstrainedNetworkAccess = false
         request.timeoutInterval = Config.timeout
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        if let secret = secret {
-            request.addValue(secret.sha1(), forHTTPHeaderField: "api-secret")
-        }
         request.httpBody = try! JSONCoding.encoder.encode(prefs)
         request.httpMethod = "POST"
 
@@ -562,20 +606,18 @@ extension NightscoutAPI {
     }
 
     func uploadSettings(_ settings: NightscoutSettings) -> AnyPublisher<Void, Swift.Error> {
+        let statURL = IAPSconfig.statURL
         var components = URLComponents()
-        components.scheme = url.scheme
-        components.host = url.host
-        components.port = url.port
-        components.path = Config.statusPath
+        components.scheme = statURL.scheme
+        components.host = statURL.host
+        components.port = statURL.port
+        components.path = Config.sharePath
 
         var request = URLRequest(url: components.url!)
         request.allowsConstrainedNetworkAccess = false
         request.timeoutInterval = Config.timeout
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        if let secret = secret {
-            request.addValue(secret.sha1(), forHTTPHeaderField: "api-secret")
-        }
         request.httpBody = try! JSONCoding.encoder.encode(settings)
         request.httpMethod = "POST"
 
@@ -600,6 +642,28 @@ extension NightscoutAPI {
         if let secret = secret {
             request.addValue(secret.sha1(), forHTTPHeaderField: "api-secret")
         }
+        request.httpBody = try! JSONCoding.encoder.encode(profile)
+        request.httpMethod = "POST"
+
+        return service.run(request)
+            .retry(Config.retryCount)
+            .map { _ in () }
+            .eraseToAnyPublisher()
+    }
+
+    func uploadSettingsToDatabase(_ profile: NightscoutProfileStore) -> AnyPublisher<Void, Swift.Error> {
+        let statURL = IAPSconfig.statURL
+        var components = URLComponents()
+        components.scheme = statURL.scheme
+        components.host = statURL.host
+        components.port = statURL.port
+        components.path = Config.sharePath
+
+        var request = URLRequest(url: components.url!)
+        request.allowsConstrainedNetworkAccess = false
+        request.timeoutInterval = Config.timeout
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+
         request.httpBody = try! JSONCoding.encoder.encode(profile)
         request.httpMethod = "POST"
 

@@ -32,6 +32,56 @@ final class OverrideStorage {
         return overrideArray
     }
 
+    func fetchPreset(id: String) -> OverridePresets? {
+        var overrideArray = [OverridePresets]()
+        coredataContext.performAndWait {
+            let requestOverrides = OverridePresets.fetchRequest() as NSFetchRequest<OverridePresets>
+            let sortOverride = NSSortDescriptor(key: "date", ascending: false)
+            requestOverrides.sortDescriptors = [sortOverride]
+            requestOverrides.predicate = NSPredicate(
+                format: "id == %@", id as String
+            )
+            try? overrideArray = self.coredataContext.fetch(requestOverrides)
+        }
+        return overrideArray.first
+    }
+
+    func fetchLatestAutoISFsettings() -> [Auto_ISF] {
+        var array = [Auto_ISF]()
+        coredataContext.performAndWait {
+            let request = Auto_ISF.fetchRequest() as NSFetchRequest<Auto_ISF>
+            let sort = NSSortDescriptor(key: "date", ascending: false)
+            request.sortDescriptors = [sort]
+            request.fetchLimit = 1
+            try? array = self.coredataContext.fetch(request)
+        }
+        return array
+    }
+
+    func fetchAutoISFsetting(id: String) -> Auto_ISF? {
+        var array = [Auto_ISF]()
+        coredataContext.performAndWait {
+            let request = Auto_ISF.fetchRequest() as NSFetchRequest<Auto_ISF>
+            request.predicate = NSPredicate(
+                format: "id == %@", id as String
+            )
+            try? array = self.coredataContext.fetch(request)
+        }
+        return array.first
+    }
+
+    func fetchNumberOfOverrides(numbers: Int) -> [Override] {
+        var overrideArray = [Override]()
+        coredataContext.performAndWait {
+            let requestOverrides = Override.fetchRequest() as NSFetchRequest<Override>
+            let sortOverride = NSSortDescriptor(key: "date", ascending: false)
+            requestOverrides.sortDescriptors = [sortOverride]
+            requestOverrides.fetchLimit = numbers
+            try? overrideArray = self.coredataContext.fetch(requestOverrides)
+        }
+        return overrideArray
+    }
+
     func fetchOverrideHistory(interval: NSDate) -> [OverrideHistory] {
         var overrideArray = [OverrideHistory]()
         coredataContext.performAndWait {
@@ -54,9 +104,11 @@ final class OverrideStorage {
             let history = OverrideHistory(context: self.coredataContext)
             if let latest = scheduled {
                 history.duration = -1 * (latest.date ?? Date()).timeIntervalSinceNow.minutes
-                print("History duration: \(history.duration) min")
                 history.date = latest.date ?? Date()
-                history.target = Double(latest.target ?? 100)
+                // Looks better in Home View Main Chart when target isn't == 0.
+                if Double(latest.target ?? 100) < 6 {
+                    history.target = 6
+                } else { history.target = Double(latest.target ?? 100) }
                 duration = history.duration
             }
             profiles.enabled = false
@@ -80,20 +132,47 @@ final class OverrideStorage {
             save.indefinite = preset.indefinite
             save.isPreset = true
             save.isf = preset.isf
+            save.basal = preset.basal
             save.isfAndCr = preset.isfAndCr
             save.percentage = preset.percentage
             save.smbIsAlwaysOff = preset.smbIsAlwaysOff
+            save.smbIsOff = preset.smbIsOff
             save.smbMinutes = preset.smbMinutes
             save.uamMinutes = preset.uamMinutes
+            save.maxIOB = preset.maxIOB
             save.target = preset.target
+            save.overrideMaxIOB = preset.overrideAutoISF
+            save.overrideAutoISF = preset.overrideAutoISF
+            save.endWIthNewCarbs = preset.endWIthNewCarbs
+            save.glucoseOverrideThresholdActive = preset.glucoseOverrideThresholdActive
+            save.glucoseOverrideThreshold = preset.glucoseOverrideThreshold
+            save.glucoseOverrideThresholdActiveDown = preset.glucoseOverrideThresholdActiveDown
+            save.glucoseOverrideThresholdDown = preset.glucoseOverrideThresholdDown
             try? coredataContext.save()
         }
     }
 
-    func fetchProfile(_ name: String) -> Override? {
+    func activatePreset(_ id: String) {
+        coredataContext.performAndWait {
+            var presetsArray = [OverridePresets]()
+            coredataContext.performAndWait {
+                let requestPresets = OverridePresets.fetchRequest() as NSFetchRequest<OverridePresets>
+                requestPresets.predicate = NSPredicate(
+                    format: "id == %@", id
+                )
+                try? presetsArray = self.coredataContext.fetch(requestPresets)
+
+                guard let overidePreset = presetsArray.first else {
+                    return
+                }
+                overrideFromPreset(overidePreset)
+            }
+        }
+    }
+
+    func fetchProfilePreset(_ name: String) -> OverridePresets? {
         var presetsArray = [OverridePresets]()
-        var overrideArray = [Override]()
-        var override: Override?
+        var preset: OverridePresets?
         coredataContext.performAndWait {
             let requestPresets = OverridePresets.fetchRequest() as NSFetchRequest<OverridePresets>
             requestPresets.predicate = NSPredicate(
@@ -101,27 +180,15 @@ final class OverrideStorage {
             )
             try? presetsArray = self.coredataContext.fetch(requestPresets)
 
-            guard let preset = presetsArray.first else {
+            guard let overidePreset = presetsArray.first else {
                 return
             }
-            guard let id = preset.id else {
-                return
-            }
-            let requestOverrides = Override.fetchRequest() as NSFetchRequest<Override>
-            requestOverrides.predicate = NSPredicate(
-                format: "id == %@", id
-            )
-            try? overrideArray = self.coredataContext.fetch(requestOverrides)
-
-            guard let override_ = overrideArray.first else {
-                return
-            }
-            override = override_
+            preset = overidePreset
         }
-        return override
+        return preset
     }
 
-    func fetchProfiles() -> OverridePresets? {
+    func fetchProfile() -> OverridePresets? {
         var presetsArray = [OverridePresets]()
         coredataContext.performAndWait {
             let requestPresets = OverridePresets.fetchRequest() as NSFetchRequest<OverridePresets>
@@ -135,7 +202,7 @@ final class OverrideStorage {
             return nil
         }
 
-        guard (last.date ?? Date.now).addingTimeInterval(Int(last.duration ?? 0).minutes.timeInterval) > Date(),
+        guard (last.date ?? Date.now).addingTimeInterval(Int(truncating: last.duration ?? 0).minutes.timeInterval) > Date(),
               (last.date ?? Date.now) <= Date.now,
               last.duration != 0
         else {
@@ -157,7 +224,6 @@ final class OverrideStorage {
     }
 
     func activateOverride(_ override: Override) {
-        var overrideArray = [Override]()
         coredataContext.performAndWait {
             let save = Override(context: coredataContext)
             save.date = Date.now
@@ -171,12 +237,21 @@ final class OverrideStorage {
             save.indefinite = override.indefinite
             save.isPreset = override.isPreset
             save.isf = override.isf
+            save.basal = override.basal
             save.isfAndCr = override.isfAndCr
             save.percentage = override.percentage
             save.smbIsAlwaysOff = override.smbIsAlwaysOff
+            save.smbIsOff = override.smbIsOff
             save.smbMinutes = override.smbMinutes
             save.uamMinutes = override.uamMinutes
             save.target = override.target
+            save.overrideMaxIOB = override.overrideAutoISF
+            save.overrideAutoISF = override.overrideAutoISF
+            save.endWIthNewCarbs = override.endWIthNewCarbs
+            save.glucoseOverrideThresholdActive = override.glucoseOverrideThresholdActive
+            save.glucoseOverrideThreshold = override.glucoseOverrideThreshold
+            save.glucoseOverrideThresholdActiveDown = override.glucoseOverrideThresholdActiveDown
+            save.glucoseOverrideThresholdDown = override.glucoseOverrideThresholdDown
             try? coredataContext.save()
         }
     }
@@ -261,12 +336,23 @@ final class OverrideStorage {
                 save.indefinite = preset.indefinite
                 save.isPreset = true
                 save.isf = preset.isf
+                save.basal = preset.basal
                 save.isfAndCr = preset.isfAndCr
                 save.percentage = preset.percentage
                 save.smbIsAlwaysOff = preset.smbIsAlwaysOff
+                save.smbIsOff = preset.smbIsOff
                 save.smbMinutes = preset.smbMinutes
                 save.uamMinutes = preset.uamMinutes
-                save.target = preset.target
+                save.overrideMaxIOB = preset.overrideAutoISF
+                save.overrideAutoISF = preset.overrideAutoISF
+                save.endWIthNewCarbs = preset.endWIthNewCarbs
+                save.glucoseOverrideThresholdActive = preset.glucoseOverrideThresholdActive
+                save.glucoseOverrideThreshold = preset.glucoseOverrideThreshold
+                save.glucoseOverrideThresholdActiveDown = preset.glucoseOverrideThresholdActiveDown
+                save.glucoseOverrideThresholdDown = preset.glucoseOverrideThresholdDown
+                if (preset.target ?? 0) as Decimal > 6 {
+                    save.target = preset.target
+                } else { save.target = 6 }
                 try? coredataContext.save()
             }
         }
@@ -327,5 +413,28 @@ final class OverrideStorage {
             return Int(latest.number)
         }
         return nil
+    }
+
+    // Currently not used.
+    func DeleteBatch(identifier: String?, entity: String) {
+        guard let id = identifier else { return }
+        coredataContext.performAndWait {
+            let fetchRequest: NSFetchRequest<NSFetchRequestResult>
+            fetchRequest = NSFetchRequest(entityName: entity)
+            fetchRequest.predicate = NSPredicate(format: "id == %@", id)
+            let deleteRequest = NSBatchDeleteRequest(
+                fetchRequest: fetchRequest
+            )
+            deleteRequest.resultType = .resultTypeObjectIDs
+            do {
+                let deleteResult = try coredataContext.execute(deleteRequest) as? NSBatchDeleteResult
+                if let objectIDs = deleteResult?.result as? [NSManagedObjectID] {
+                    NSManagedObjectContext.mergeChanges(
+                        fromRemoteContextSave: [NSDeletedObjectsKey: objectIDs],
+                        into: [coredataContext]
+                    )
+                }
+            } catch { debug(.apsManager, entity + "records failed to delete in batch.") }
+        }
     }
 }
